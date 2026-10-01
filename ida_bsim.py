@@ -20,7 +20,7 @@ if str(_PLUGIN_DIR) not in sys.path:
 from ida_bsim_core import (  # noqa: E402
     BSimError, format_match_rows, load_search_settings, normalize_database_url, query,
     ranked_matches,
-    remember_database, save_search_settings, validate_search_options,
+    remember_database, save_search_settings, user_directories, validate_search_options,
 )
 
 
@@ -29,7 +29,7 @@ class SearchForm(ida_kernwin.Form):
 
     def __init__(self, function_label, databases, settings):
         F = ida_kernwin.Form
-        items = databases or ["file:/"]
+        items = databases or [str(Path.home() / "bsim" / "db")]
         super().__init__(
             """STARTITEM 0
 BUTTON YES* Search
@@ -142,8 +142,8 @@ class IDABSimPlugin(ida_idaapi.plugin_t):
         self._closed = False
         self._chooser = None
         self._ghidra_home = os.environ.get("IDA_BSIM_GHIDRA_HOME", "")
-        config_home = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-        self._settings_path = config_home / "ida-bsim" / "settings.json"
+        config_dir, _ = user_directories()
+        self._settings_path = config_dir / "settings.json"
         self._search_settings = load_search_settings(self._settings_path)
         preferred_db = os.environ.get("IDA_BSIM_DB_URL", "").strip()
         if preferred_db:
@@ -159,7 +159,7 @@ class IDABSimPlugin(ida_idaapi.plugin_t):
 
     def _ghidra_settings(self):
         if not self._ghidra_home:
-            value = ida_kernwin.ask_str("", 0, "Ghidra release directory (contains support/analyzeHeadless)")
+            value = ida_kernwin.ask_str("", 0, "Ghidra release directory (contains support/analyzeHeadless or analyzeHeadless.bat)")
             if value is None:
                 return False
             self._ghidra_home = value.strip()
@@ -212,7 +212,7 @@ class IDABSimPlugin(ida_idaapi.plugin_t):
         script_dir = _PLUGIN_DIR / "ida_bsim_scripts"
         if not script_dir.is_dir():
             script_dir = _PLUGIN_DIR / "ghidra_scripts"  # run directly from source checkout
-        cache_dir = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "ida-bsim"
+        _, cache_dir = user_directories()
         project_dir = Path(os.environ.get("IDA_BSIM_PROJECT_DIR", str(Path.home() / "ida-bsim-projects")))
 
         self._busy = True

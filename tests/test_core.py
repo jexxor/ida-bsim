@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -6,9 +7,10 @@ import unittest
 from unittest.mock import patch
 
 from ida_bsim_core import (
-    BSimError, build_command, format_match_rows, load_search_settings, query,
-    ranked_matches,
-    remember_database, save_search_settings, validate_search_options,
+    BSimError, build_command, format_match_rows, ghidra_launcher,
+    load_search_settings, normalize_database_url, query, ranked_matches,
+    remember_database, save_search_settings, user_directories,
+    validate_search_options,
 )
 
 
@@ -20,6 +22,7 @@ class CoreTests(unittest.TestCase):
         self.home = self.root / "Ghidra release"
         (self.home / "support").mkdir(parents=True)
         (self.home / "support" / "analyzeHeadless").touch()
+        (self.home / "support" / "analyzeHeadless.bat").touch()
         self.scripts = self.root / "scripts"
         self.scripts.mkdir()
         (self.scripts / "IdaBsimQuery.java").touch()
@@ -54,7 +57,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("-readOnly", self.calls[1])
         self.assertEqual(self.calls[0][-7:-1],
                          ["file:/home/test/bsimdb", "250", "1234", "0.7", "0.0", "10"])
-        self.assertEqual(self.calls[0][0], str(self.home / "support" / "analyzeHeadless"))
+        self.assertEqual(self.calls[0][0], str(ghidra_launcher(self.home)))
         self.assertEqual(self.calls[0][1], str(self.projects))
         self.assertNotIn(".cache", self.calls[0][1])
 
@@ -71,6 +74,44 @@ class CoreTests(unittest.TestCase):
         with patch("ida_bsim_core.subprocess.run", side_effect=self.fake_run):
             self.invoke(str(database))
         self.assertEqual(self.calls[0][-7], database.as_uri())
+
+    def test_windows_h2_paths_and_urls(self):
+        self.assertEqual(normalize_database_url(r"C:\Users\Ada\My Db.mv.db", windows=True),
+                         "file:///C:/Users/Ada/My%20Db.mv.db")
+        self.assertEqual(normalize_database_url(r"\\server\share\BSim\db", windows=True),
+                         "file://server/share/BSim/db")
+        self.assertEqual(normalize_database_url("file:///C:/BSim/db", windows=True),
+                         "file:///C:/BSim/db")
+        with self.assertRaises(BSimError):
+            normalize_database_url(r"C:relative\db", windows=True)
+
+    def test_platform_user_directories(self):
+        linux = user_directories("linux", {"XDG_CONFIG_HOME": "/tmp/config",
+                                           "XDG_CACHE_HOME": "/tmp/cache"}, self.root)
+        self.assertEqual(linux, (Path("/tmp/config/ida-bsim"), Path("/tmp/cache/ida-bsim")))
+        mac = user_directories("darwin", {}, self.root)
+        self.assertEqual(mac, (self.root / "Library/Application Support/ida-bsim",
+                               self.root / "Library/Caches/ida-bsim"))
+        windows = user_directories("win32", {"APPDATA": "/tmp/Roaming",
+                                              "LOCALAPPDATA": "/tmp/Local"}, self.root)
+        self.assertEqual(windows, (Path("/tmp/Roaming/ida-bsim"),
+                                   Path("/tmp/Local/ida-bsim/Cache")))
+        fallback = user_directories("win32", {}, self.root)
+        self.assertEqual(fallback[0], self.root / "AppData/Roaming/ida-bsim")
+
+    def test_windows_launcher_is_used_for_validation_and_command(self):
+        select_windows = lambda home: ghidra_launcher(home, windows=True)
+        with patch("ida_bsim_core.ghidra_launcher", side_effect=select_windows), \
+                patch("ida_bsim_core.subprocess.run", side_effect=self.fake_run):
+            self.invoke()
+        self.assertEqual(self.calls[0][0], str(self.home / "support" / "analyzeHeadless.bat"))
+
+    def test_missing_windows_launcher_names_correct_file(self):
+        (self.home / "support" / "analyzeHeadless.bat").unlink()
+        with patch("ida_bsim_core.ghidra_launcher",
+                   side_effect=lambda home: ghidra_launcher(home, windows=True)):
+            with self.assertRaisesRegex(BSimError, r"support[/\\]analyzeHeadless\.bat"):
+                self.invoke()
 
     def test_relative_database_path_fails_before_import(self):
         with patch("ida_bsim_core.subprocess.run") as run:
@@ -113,7 +154,8 @@ class CoreTests(unittest.TestCase):
                     "confidence": 8.5, "max_matches": 30}
         save_search_settings(settings_file, settings)
         self.assertEqual(load_search_settings(settings_file), settings)
-        self.assertEqual(settings_file.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(settings_file.stat().st_mode & 0o777, 0o600)
 
     def test_malformed_history_defaults_without_crashing(self):
         settings_file = self.root / "settings.json"

@@ -4,8 +4,9 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import subprocess
+import sys
 import tempfile
 from urllib.parse import urlparse
 
@@ -19,6 +20,36 @@ MAX_DATABASE_HISTORY = 20
 
 class BSimError(Exception):
     pass
+
+
+def user_directories(platform=None, environ=None, home=None):
+    """Return platform-appropriate settings and temporary-result directories."""
+    platform = sys.platform if platform is None else platform
+    environ = os.environ if environ is None else environ
+    home = Path.home() if home is None else Path(home)
+    if platform == "win32":
+        config_base = Path(environ.get("APPDATA") or home / "AppData" / "Roaming")
+        cache_base = Path(environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        config = config_base / "ida-bsim"
+        cache = cache_base / "ida-bsim" / "Cache"
+    elif platform == "darwin":
+        config = home / "Library" / "Application Support" / "ida-bsim"
+        cache = home / "Library" / "Caches" / "ida-bsim"
+    else:
+        config = home / ".config" / "ida-bsim"
+        cache = home / ".cache" / "ida-bsim"
+    if environ.get("XDG_CONFIG_HOME"):
+        config = Path(environ["XDG_CONFIG_HOME"]) / "ida-bsim"
+    if environ.get("XDG_CACHE_HOME"):
+        cache = Path(environ["XDG_CACHE_HOME"]) / "ida-bsim"
+    return config, cache
+
+
+def ghidra_launcher(ghidra_home, windows=None):
+    if windows is None:
+        windows = os.name == "nt"
+    name = "analyzeHeadless.bat" if windows else "analyzeHeadless"
+    return Path(ghidra_home) / "support" / name
 
 
 def validate_search_options(similarity, confidence, max_matches):
@@ -103,19 +134,23 @@ def save_search_settings(path, settings):
         tmp_path.unlink(missing_ok=True)
 
 
-def normalize_database_url(value):
+def normalize_database_url(value, windows=None):
     """Accept Ghidra BSim URLs or absolute paths to local H2 databases."""
     value = value.strip()
     if not value:
         raise BSimError("BSim database URL is empty")
+    url = urlparse(value)
+    if url.scheme in ("file", "postgresql", "https", "elastic", "ghidra") and url.path:
+        return value
+    if windows is None:
+        windows = os.name == "nt"
+    if windows and PureWindowsPath(value).is_absolute():
+        return PureWindowsPath(value).as_uri()
     if value.startswith(("/", "~")):
         path = Path(value).expanduser()
         if not path.is_absolute():
             raise BSimError("BSim database path must be absolute: " + value)
         return path.resolve().as_uri()
-    url = urlparse(value)
-    if url.scheme in ("file", "postgresql", "https", "elastic", "ghidra") and url.path:
-        return value
     raise BSimError("BSim database must be an absolute H2 path or URL (e.g. file:/home/me/bsim/db)")
 
 
@@ -132,7 +167,7 @@ def build_command(ghidra_home, project_dir, project_name, executable,
                   cached=False, similarity=DEFAULT_SIMILARITY,
                   confidence=DEFAULT_CONFIDENCE, max_matches=DEFAULT_MAX_MATCHES):
     """Build argv without a shell; script args follow -postScript last."""
-    launcher = Path(ghidra_home) / "support" / "analyzeHeadless"
+    launcher = ghidra_launcher(ghidra_home)
     command = [str(launcher), str(project_dir), project_name]
     if cached:
         command += ["-process", Path(executable).name, "-noanalysis", "-readOnly"]
@@ -159,8 +194,10 @@ def query(ghidra_home, database_url, executable, script_dir, cache_dir,
     cache_dir = Path(cache_dir).expanduser().resolve()
     project_dir = Path(project_dir or (Path.home() / "ida-bsim-projects")).expanduser().resolve()
 
-    if not (ghidra_home / "support" / "analyzeHeadless").is_file():
-        raise BSimError("Ghidra release missing support/analyzeHeadless: " + str(ghidra_home))
+    launcher = ghidra_launcher(ghidra_home)
+    if not launcher.is_file():
+        raise BSimError("Ghidra release missing {}: {}".format(
+            launcher.relative_to(ghidra_home), ghidra_home))
     if not (script_dir / SCRIPT_NAME).is_file():
         raise BSimError("Ghidra script missing: " + str(script_dir / SCRIPT_NAME))
     if not executable.is_file():
